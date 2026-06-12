@@ -23,5 +23,5 @@ jobs:
       - name: Run push script
         env:
           PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MY_GITHUB_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
         run: python push.py
