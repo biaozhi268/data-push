@@ -389,7 +389,7 @@ def build_content(prices, new_data=None):
     price = new_data['price']
     yoy = new_data['yoy']
     
-    title = f"原奶第{month}月第{week}周 {price} 同比{yoy}"
+    title = f"原奶{month}月第{week}周 {price} 同比{yoy}"
     
     if not prices:
         prices = []
