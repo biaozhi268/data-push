@@ -7,7 +7,7 @@ from datetime import datetime
 
 # ============ 配置 ============
 TOKEN = os.environ.get('PUSH_TOKEN', '')
-GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
+GITHUB_TOKEN = os.environ.get('MY_GITHUB_TOKEN', '')
 REPO_OWNER = "biaozhi268"        # 改成你的 GitHub 用户名
 REPO_NAME = "milk-price-push"  # 改成你的仓库名
 RELEASE_ASSET_NAME = "history.json"
