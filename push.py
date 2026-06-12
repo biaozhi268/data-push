@@ -14,7 +14,7 @@ RELEASE_ASSET_NAME = "history.json"
 
 PUSH_BASE = "https://push.showdoc.com.cn/server/api/push"
 
-# 数据源定义（按优先级排列）
+# 数据源定义
 DATA_SOURCES = [
     {'name': 'feedtrade', 'label': '饲料行业信息网', 'parse_article': 'parse_feedtrade_article'},
     {'name': 'dairyonline', 'label': '乳业在线', 'parse_article': 'parse_dairyonline_article'},
@@ -22,6 +22,9 @@ DATA_SOURCES = [
 ]
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+API_HEADERS = {
+    'Accept': 'application/vnd.github.v3+json',
+}
 
 
 # ============ 数据源解析 ============
@@ -237,25 +240,27 @@ def scrape_all_sources():
 
 # ============ GitHub Releases 存储 ============
 
+def make_github_headers():
+    if GITHUB_TOKEN:
+        API_HEADERS['Authorization'] = f'token {GITHUB_TOKEN}'
+    return API_HEADERS
+
+
 def get_release_id():
-    """获取最新 Release ID"""
     api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
-    headers = {'Authorization': f'token {GITHUB_TOKEN}', 'Accept': 'application/vnd.github.v3+json'}
     try:
-        resp = requests.get(api_url, headers=headers, timeout=15)
+        resp = requests.get(api_url, headers=make_github_headers(), timeout=15)
         if resp.status_code == 200:
             return resp.json().get('id')
         return None
     except Exception as e:
-        print(f"[GitHub] 获取 Release 失败: {e}")
+        print(f"[GitHub] 获取 Release 失败 (HTTP {resp.status_code if 'resp' in dir() else str(e)})")
         return None
 
 
 def upload_history_to_github(history):
-    """上传 history.json 到 GitHub Releases"""
     import tempfile
     
-    # 创建临时 JSON 文件
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
         temp_file = f.name
@@ -264,50 +269,44 @@ def upload_history_to_github(history):
         release_id = get_release_id()
         
         if release_id:
-            # 已有 Release，更新资产
-            asset_api = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/assets/{release_id}"
-            # 先删除旧资产
+            # 已有 Release，删除旧资产
             asset_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/{release_id}/assets"
-            headers = {'Authorization': f'token {GITHUB_TOKEN}', 'Accept': 'application/vnd.github.v3+json'}
-            resp = requests.get(asset_url, headers=headers, timeout=15)
+            resp = requests.get(asset_url, headers=make_github_headers(), timeout=15)
             if resp.status_code == 200:
                 for asset in resp.json():
                     if asset['name'] == RELEASE_ASSET_NAME:
-                        delete_url = asset['url']
-                        requests.delete(delete_url, headers=headers, timeout=15)
+                        requests.delete(asset['url'], headers=make_github_headers(), timeout=15)
                         print(f"[GitHub] 已删除旧资产: {RELEASE_ASSET_NAME}")
             
-            # 上传新资产
             upload_url = f"https://uploads.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/{release_id}/assets?name={RELEASE_ASSET_NAME}"
-            resp = requests.post(upload_url, headers=headers, files={'file': open(temp_file, 'rb')}, timeout=30)
+            resp = requests.post(upload_url, headers=make_github_headers(), files={'file': open(temp_file, 'rb')}, timeout=30)
             if resp.status_code == 201:
-                print(f"[GitHub] ✅ 已上传 history.json")
+                print(f"[GitHub] ✅ 已上传 history.json ({len(history)} 条记录)")
                 return True
             else:
-                print(f"[GitHub] ❌ 上传失败: {resp.status_code} {resp.text}")
+                print(f"[GitHub] ❌ 上传失败: HTTP {resp.status_code} {resp.text[:200]}")
                 return False
         else:
             # 创建新 Release
             api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases"
-            headers = {'Authorization': f'token {GITHUB_TOKEN}', 'Accept': 'application/vnd.github.v3+json'}
             data = {
                 'tag_name': 'history',
                 'name': 'Milk Price History',
                 'body': '每日原奶收购价格历史数据缓存'
             }
-            resp = requests.post(api_url, headers=headers, json=data, timeout=15)
+            resp = requests.post(api_url, headers=make_github_headers(), json=data, timeout=15)
             if resp.status_code == 201:
                 new_release_id = resp.json().get('id')
                 upload_url = f"https://uploads.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/{new_release_id}/assets?name={RELEASE_ASSET_NAME}"
-                resp = requests.post(upload_url, headers=headers, files={'file': open(temp_file, 'rb')}, timeout=30)
+                resp = requests.post(upload_url, headers=make_github_headers(), files={'file': open(temp_file, 'rb')}, timeout=30)
                 if resp.status_code == 201:
-                    print(f"[GitHub] ✅ 已创建 Release 并上传 history.json")
+                    print(f"[GitHub] ✅ 已创建 Release 并上传 history.json ({len(history)} 条记录)")
                     return True
                 else:
-                    print(f"[GitHub] ❌ 上传失败: {resp.status_code} {resp.text}")
+                    print(f"[GitHub] ❌ 上传失败: HTTP {resp.status_code} {resp.text[:200]}")
                     return False
             else:
-                print(f"[GitHub] ❌ 创建 Release 失败: {resp.status_code} {resp.text}")
+                print(f"[GitHub] ❌ 创建 Release 失败: HTTP {resp.status_code} {resp.text[:200]}")
                 return False
     except Exception as e:
         print(f"[GitHub] 上传异常: {e}")
@@ -317,7 +316,6 @@ def upload_history_to_github(history):
 
 
 def download_history_from_github():
-    """从 GitHub Releases 下载 history.json"""
     try:
         release_id = get_release_id()
         if not release_id:
@@ -325,10 +323,9 @@ def download_history_from_github():
             return []
         
         asset_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/{release_id}/assets"
-        headers = {'Authorization': f'token {GITHUB_TOKEN}', 'Accept': 'application/vnd.github.v3+json'}
-        resp = requests.get(asset_url, headers=headers, timeout=15)
+        resp = requests.get(asset_url, headers=make_github_headers(), timeout=15)
         if resp.status_code != 200:
-            print(f"[GitHub] 获取资产列表失败: {resp.status_code}")
+            print(f"[GitHub] 获取资产列表失败: HTTP {resp.status_code}")
             return []
         
         for asset in resp.json():
@@ -340,7 +337,7 @@ def download_history_from_github():
                     print(f"[GitHub] ✅ 已下载 {len(history)} 条历史记录")
                     return history
                 else:
-                    print(f"[GitHub] 下载文件失败: {resp.status_code}")
+                    print(f"[GitHub] 下载文件失败: HTTP {resp.status_code}")
                     return []
         print("[GitHub] 未找到 history.json 资产")
         return []
@@ -448,11 +445,9 @@ def main():
     print("🥛 原奶价格推送脚本")
     print("=" * 50)
     
-    # 1. 从 GitHub 下载历史数据
     print("\n[1/5] 从 GitHub 下载历史数据...")
     history = download_history_from_github()
     
-    # 2. 抓取最新一周
     print("\n[2/5] 抓取最新一周数据...")
     new_data = scrape_all_sources()
     
@@ -461,17 +456,16 @@ def main():
     else:
         print("\n⚠️ 所有数据源均未抓取到新数据")
     
-    # 3. 合并去重
     print("\n[3/5] 合并历史数据...")
     merged = dedup_and_keep_recent(history, new_data)
     print(f"[历史] 合并后有 {len(merged)} 条记录")
     
-    # 4. 上传到 GitHub
     print("\n[4/5] 上传到 GitHub Releases...")
     if new_data:
         upload_history_to_github(merged)
+    else:
+        print("[GitHub] 无新数据，跳过上传")
     
-    # 5. 构建并推送
     print("\n[5/5] 推送到微信...")
     title, content = build_content(merged, new_data)
     push_to_wechat(title, content)
