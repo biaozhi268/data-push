@@ -7,28 +7,18 @@ from datetime import datetime
 
 # ============ 配置 ============
 TOKEN = os.environ.get('PUSH_TOKEN', '')
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
-HISTORY_FILE = os.path.join(DATA_DIR, 'history.json')
+GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
+REPO_OWNER = "biaozhi268"        # 改成你的 GitHub 用户名
+REPO_NAME = "milk-price-push"  # 改成你的仓库名
+RELEASE_ASSET_NAME = "history.json"
 
 PUSH_BASE = "https://push.showdoc.com.cn/server/api/push"
 
 # 数据源定义（按优先级排列）
 DATA_SOURCES = [
-    {
-        'name': 'feedtrade',
-        'label': '饲料行业信息网',
-        'parse_article': 'parse_feedtrade_article',
-    },
-    {
-        'name': 'dairyonline',
-        'label': '乳业在线',
-        'parse_article': 'parse_dairyonline_article',
-    },
-    {
-        'name': 'moa',
-        'label': '农业农村部',
-        'parse_article': 'parse_moa_article',
-    },
+    {'name': 'feedtrade', 'label': '饲料行业信息网', 'parse_article': 'parse_feedtrade_article'},
+    {'name': 'dairyonline', 'label': '乳业在线', 'parse_article': 'parse_dairyonline_article'},
+    {'name': 'moa', 'label': '农业农村部', 'parse_article': 'parse_moa_article'},
 ]
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
@@ -37,17 +27,14 @@ HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 # ============ 数据源解析 ============
 
 def parse_feedtrade_page(page=1):
-    """从饲料行业信息网抓取文章链接"""
     if page == 1:
         url = "https://www.feedtrade.com.cn/whey/milk_market/"
     else:
         url = f"https://www.feedtrade.com.cn/whey/milk_market/?nowpage={page}"
-    
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
-        
         articles = []
         for link in soup.find_all('a', href=True):
             href = link['href']
@@ -62,18 +49,15 @@ def parse_feedtrade_page(page=1):
 
 
 def parse_feedtrade_article(url):
-    """解析单篇价格文章"""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
         text = soup.get_text()
-        
         price_match = re.search(r'(\d+\.?\d*)\s*元/公斤', text)
         if not price_match:
             return None
         price = float(price_match.group(1))
-        
         yoy_match = re.search(r'同比([上下]跌?|\S*)\s*(\d+\.?\d*)%', text)
         if yoy_match:
             direction = yoy_match.group(1)
@@ -84,7 +68,6 @@ def parse_feedtrade_article(url):
                 yoy = f"+{value}%"
         else:
             yoy = 'N/A'
-        
         week_match = re.search(r'(\d{1,2})月第(\d{1,2})周', text)
         if week_match:
             month = week_match.group(1)
@@ -97,14 +80,12 @@ def parse_feedtrade_article(url):
 
 
 def parse_dairyonline_page(page=1):
-    """从乳业在线抓取"""
     try:
         base = "https://www.dairyonline.cn"
         url = f"{base}/category/list-cate-id-25-p-{page}" if page > 1 else f"{base}/tag/%e7%94%9f%e9%b2%9c"
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
-        
         articles = []
         for link in soup.find_all('a', href=True):
             href = link['href']
@@ -119,18 +100,15 @@ def parse_dairyonline_page(page=1):
 
 
 def parse_dairyonline_article(url):
-    """解析乳业在线文章"""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
         text = soup.get_text()
-        
         price_match = re.search(r'(\d+\.?\d*)\s*元/公斤', text)
         if not price_match:
             return None
         price = float(price_match.group(1))
-        
         yoy_match = re.search(r'同比([上下]跌?|\S*)\s*(\d+\.?\d*)%', text)
         if yoy_match:
             direction = yoy_match.group(1)
@@ -141,7 +119,6 @@ def parse_dairyonline_article(url):
                 yoy = f"+{value}%"
         else:
             yoy = 'N/A'
-        
         week_match = re.search(r'(\d{1,2})月第(\d{1,2})周', text)
         if week_match:
             month = week_match.group(1)
@@ -154,12 +131,10 @@ def parse_dairyonline_article(url):
 
 
 def parse_moa_page():
-    """从农业农村部官网抓取"""
     try:
         resp = requests.get("https://www.moa.gov.cn/wx/blyj_1020/sccpjgbj/", headers=HEADERS, timeout=15)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
-        
         articles = []
         for link in soup.find_all('a', href=True):
             text = link.get_text(strip=True)
@@ -173,18 +148,15 @@ def parse_moa_page():
 
 
 def parse_moa_article(url):
-    """解析农业农村部文章"""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
         text = soup.get_text()
-        
         price_match = re.search(r'(\d+\.?\d*)\s*元/公斤', text)
         if not price_match:
             return None
         price = float(price_match.group(1))
-        
         yoy_match = re.search(r'同比([上下]跌?|\S*)\s*(\d+\.?\d*)%', text)
         if yoy_match:
             direction = yoy_match.group(1)
@@ -195,7 +167,6 @@ def parse_moa_article(url):
                 yoy = f"+{value}%"
         else:
             yoy = 'N/A'
-        
         week_match = re.search(r'(\d{1,2})月第(\d{1,2})周', text)
         if week_match:
             month = week_match.group(1)
@@ -210,32 +181,34 @@ def parse_moa_article(url):
 # ============ 多数据源调度 ============
 
 def scrape_from_source(source):
-    """从指定数据源抓取最新一周数据，成功就停"""
     name = source['name']
     label = source['label']
-    parse_article_fn = source['parse_article']
+    parse_article = None
     
-    print(f"\n[{label}] 开始抓取...")
-    
-    # 根据数据源调用不同的页面抓取
     if name == 'feedtrade':
-        fetch_page = parse_feedtrade_page
         parse_article = parse_feedtrade_article
     elif name == 'dairyonline':
-        fetch_page = parse_dairyonline_page
         parse_article = parse_dairyonline_article
     elif name == 'moa':
-        fetch_page = parse_moa_page
         parse_article = parse_moa_article
     else:
         return None
     
-    # 多页抓取，遇到有数据的文章就解析
+    print(f"\n[{label}] 开始抓取...")
+    
+    fetch_page = None
+    if name == 'feedtrade':
+        fetch_page = parse_feedtrade_page
+    elif name == 'dairyonline':
+        fetch_page = parse_dairyonline_page
+    elif name == 'moa':
+        fetch_page = parse_moa_page
+    
     for page in range(1, 11):
         if name == 'moa' and page > 1:
-            articles = []  # 农业农村部只抓第1页
+            articles = []
         else:
-            articles = fetch_page(page)
+            articles = fetch_page(page) if fetch_page else []
         
         if not articles:
             print(f"  [{label}] 第{page}页无数据，停止翻页")
@@ -254,7 +227,6 @@ def scrape_from_source(source):
 
 
 def scrape_all_sources():
-    """按顺序抓取，成功就停"""
     for source in DATA_SOURCES:
         data = scrape_from_source(source)
         if data:
@@ -263,45 +235,128 @@ def scrape_all_sources():
     return None
 
 
-# ============ 历史数据缓存 ============
+# ============ GitHub Releases 存储 ============
 
-def load_history():
-    """加载历史数据"""
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            print("[缓存] 加载失败，使用空缓存")
-            return []
-    return []
+def get_release_id():
+    """获取最新 Release ID"""
+    api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
+    headers = {'Authorization': f'token {GITHUB_TOKEN}', 'Accept': 'application/vnd.github.v3+json'}
+    try:
+        resp = requests.get(api_url, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            return resp.json().get('id')
+        return None
+    except Exception as e:
+        print(f"[GitHub] 获取 Release 失败: {e}")
+        return None
 
 
-def save_history(history):
-    """保存历史数据"""
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+def upload_history_to_github(history):
+    """上传 history.json 到 GitHub Releases"""
+    import tempfile
+    
+    # 创建临时 JSON 文件
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
-    print(f"[缓存] 已保存 {len(history)} 条记录")
+        temp_file = f.name
+    
+    try:
+        release_id = get_release_id()
+        
+        if release_id:
+            # 已有 Release，更新资产
+            asset_api = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/assets/{release_id}"
+            # 先删除旧资产
+            asset_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/{release_id}/assets"
+            headers = {'Authorization': f'token {GITHUB_TOKEN}', 'Accept': 'application/vnd.github.v3+json'}
+            resp = requests.get(asset_url, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                for asset in resp.json():
+                    if asset['name'] == RELEASE_ASSET_NAME:
+                        delete_url = asset['url']
+                        requests.delete(delete_url, headers=headers, timeout=15)
+                        print(f"[GitHub] 已删除旧资产: {RELEASE_ASSET_NAME}")
+            
+            # 上传新资产
+            upload_url = f"https://uploads.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/{release_id}/assets?name={RELEASE_ASSET_NAME}"
+            resp = requests.post(upload_url, headers=headers, files={'file': open(temp_file, 'rb')}, timeout=30)
+            if resp.status_code == 201:
+                print(f"[GitHub] ✅ 已上传 history.json")
+                return True
+            else:
+                print(f"[GitHub] ❌ 上传失败: {resp.status_code} {resp.text}")
+                return False
+        else:
+            # 创建新 Release
+            api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases"
+            headers = {'Authorization': f'token {GITHUB_TOKEN}', 'Accept': 'application/vnd.github.v3+json'}
+            data = {
+                'tag_name': 'history',
+                'name': 'Milk Price History',
+                'body': '每日原奶收购价格历史数据缓存'
+            }
+            resp = requests.post(api_url, headers=headers, json=data, timeout=15)
+            if resp.status_code == 201:
+                new_release_id = resp.json().get('id')
+                upload_url = f"https://uploads.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/{new_release_id}/assets?name={RELEASE_ASSET_NAME}"
+                resp = requests.post(upload_url, headers=headers, files={'file': open(temp_file, 'rb')}, timeout=30)
+                if resp.status_code == 201:
+                    print(f"[GitHub] ✅ 已创建 Release 并上传 history.json")
+                    return True
+                else:
+                    print(f"[GitHub] ❌ 上传失败: {resp.status_code} {resp.text}")
+                    return False
+            else:
+                print(f"[GitHub] ❌ 创建 Release 失败: {resp.status_code} {resp.text}")
+                return False
+    except Exception as e:
+        print(f"[GitHub] 上传异常: {e}")
+        return False
+    finally:
+        os.unlink(temp_file)
+
+
+def download_history_from_github():
+    """从 GitHub Releases 下载 history.json"""
+    try:
+        release_id = get_release_id()
+        if not release_id:
+            print("[GitHub] 未找到 Release，使用空历史")
+            return []
+        
+        asset_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/{release_id}/assets"
+        headers = {'Authorization': f'token {GITHUB_TOKEN}', 'Accept': 'application/vnd.github.v3+json'}
+        resp = requests.get(asset_url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            print(f"[GitHub] 获取资产列表失败: {resp.status_code}")
+            return []
+        
+        for asset in resp.json():
+            if asset['name'] == RELEASE_ASSET_NAME:
+                download_url = asset['browser_download_url']
+                resp = requests.get(download_url, timeout=30)
+                if resp.status_code == 200:
+                    history = resp.json()
+                    print(f"[GitHub] ✅ 已下载 {len(history)} 条历史记录")
+                    return history
+                else:
+                    print(f"[GitHub] 下载文件失败: {resp.status_code}")
+                    return []
+        print("[GitHub] 未找到 history.json 资产")
+        return []
+    except Exception as e:
+        print(f"[GitHub] 下载异常: {e}")
+        return []
 
 
 def dedup_and_keep_recent(history, new_data):
-    """
-    合并新数据到历史：
-    - 按 period 去重
-    - 保留最近 52 周数据
-    """
+    """合并新数据到历史，保留最近 52 周"""
     period_map = {}
-    
-    # 先加入旧数据
     for item in history:
         period_map[item['period']] = item
-    
-    # 再加入新数据（覆盖旧数据）
     if new_data:
         period_map[new_data['period']] = new_data
     
-    # 转回列表并按时间排序
     merged = list(period_map.values())
     
     def sort_key(item):
@@ -309,48 +364,36 @@ def dedup_and_keep_recent(history, new_data):
         if m:
             month = int(m.group(1))
             week = int(m.group(2))
-            year = 2026
-            return (year, month, week)
+            return (2026, month, week)
         return (0, 0, 0)
     
     merged.sort(key=sort_key, reverse=True)
-    
-    # 只保留最近 52 周
     return merged[:52]
 
 
 # ============ 内容构建 ============
 
 def build_content(prices, new_data=None):
-    """构建推送标题和内容"""
     today = datetime.now().strftime('%Y-%m-%d')
     
-    # 获取最新一周数据
     if not new_data:
-        # 抓取失败，推送告警
         title = f"⚠️ 原奶数据抓取失败"
-        content = (
-            f"# ⚠️ 原奶数据抓取失败（{today}）\n\n"
-            f"> 所有数据源均未获取到最新一周数据，请手动检查。\n\n"
-            f"最近缓存数据（最近7周）：\n"
-        )
+        content = f"# ⚠️ 原奶数据抓取失败（{today}）\n\n> 所有数据源均未获取到最新一周数据，请手动检查。\n\n"
         if not prices:
             content += "> 连缓存也没有，数据源可能长期中断。"
         else:
+            content += "最近缓存数据（最近7周）：\n"
             for p in prices[:7]:
                 content += f"- {p['period']}: {p['price']}元/kg (同比 {p['yoy']})\n"
         return title, content
     
-    # 获取最新一周信息
     month = re.search(r'(\d{1,2})月', new_data['period']).group(1)
     week = re.search(r'第(\d{1,2})周', new_data['period']).group(1)
     price = new_data['price']
     yoy = new_data['yoy']
     
-    # 推送标题格式
     title = f"原奶第{month}月第{week}周 {price} 同比{yoy}"
     
-    # 推送内容：最近 7 周
     if not prices:
         prices = []
     
@@ -383,7 +426,6 @@ def build_content(prices, new_data=None):
 # ============ 推送 ============
 
 def push_to_wechat(title, content):
-    """推送到 Server 酱"""
     if not TOKEN:
         print("❌ 未设置 PUSH_TOKEN，跳过推送")
         return False
@@ -392,7 +434,7 @@ def push_to_wechat(title, content):
     result = resp.json()
     
     if result.get('error_code') == 0:
-        print(f"✅ 推送到微信成功！")
+        print("✅ 推送到微信成功！")
         return True
     else:
         print(f"❌ 推送失败: {result}")
@@ -406,7 +448,12 @@ def main():
     print("🥛 原奶价格推送脚本")
     print("=" * 50)
     
-    # 1. 按顺序抓取数据源，成功就停
+    # 1. 从 GitHub 下载历史数据
+    print("\n[1/5] 从 GitHub 下载历史数据...")
+    history = download_history_from_github()
+    
+    # 2. 抓取最新一周
+    print("\n[2/5] 抓取最新一周数据...")
     new_data = scrape_all_sources()
     
     if new_data:
@@ -414,24 +461,21 @@ def main():
     else:
         print("\n⚠️ 所有数据源均未抓取到新数据")
     
-    # 2. 加载历史缓存
-    history = load_history()
-    print(f"[缓存] 当前有 {len(history)} 条历史记录")
-    
-    # 3. 合并去重，保留最近 52 周
+    # 3. 合并去重
+    print("\n[3/5] 合并历史数据...")
     merged = dedup_and_keep_recent(history, new_data)
-    print(f"[缓存] 合并后有 {len(merged)} 条记录")
+    print(f"[历史] 合并后有 {len(merged)} 条记录")
     
-    # 4. 保存历史
-    save_history(merged)
+    # 4. 上传到 GitHub
+    print("\n[4/5] 上传到 GitHub Releases...")
+    if new_data:
+        upload_history_to_github(merged)
     
-    # 5. 构建推送内容（标题：原奶第{几}月{几}周 {价格} 同比{多少}）
+    # 5. 构建并推送
+    print("\n[5/5] 推送到微信...")
     title, content = build_content(merged, new_data)
-    
-    # 6. 推送
     push_to_wechat(title, content)
     
-    # 7. 输出概要
     print("\n" + "=" * 50)
     print("📋 推送标题:", title)
     print("\n📋 最近7周数据:")
