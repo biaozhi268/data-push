@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import time
+import csv
 import json
 import argparse
 import logging
@@ -386,6 +387,46 @@ def upload_history_to_github(history: List[dict]) -> bool:
         return False
 
 
+
+def load_history_from_csv() -> list:
+    """
+    从本地 CSV 恢复历史数据（首次运行 Releases 无数据时用）
+    将 CSV 的详细格式转为 3字段格式
+    """
+    csv_path = DATA_DIR / "raw_milk_price.csv"
+    if not csv_path.exists():
+        return []
+
+    history = []
+    with open(csv_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                yoy_raw = row.get("同比变化%", "").strip()
+                yoy_str = (yoy_raw + "%") if yoy_raw and yoy_raw != "N/A" else "N/A"
+                rec = {
+                    "period": row.get("估算日期", "").strip(),
+                    "price": float(row["生鲜乳价格_元每公斤"]) if row.get("生鲜乳价格_元每公斤") else "N/A",
+                    "yoy":   yoy_str,
+                }
+                if rec["period"]:
+                    history.append(rec)
+            except Exception as e:
+                log.warning(f"CSV 行转换失败: {e}")
+
+    # 去重 + 按 period 降序
+    seen = set()
+    unique = []
+    for r in history:
+        if r["period"] not in seen:
+            seen.add(r["period"])
+            unique.append(r)
+    unique.sort(key=lambda x: x["period"], reverse=True)
+
+    log.info(f"[CSV] ✅ 从本地 CSV 恢复历史数据（{len(unique)} 条）")
+    return unique
+
+
 def deduplicate_and_keep_recent(history: List[dict], new_records: List[dict], max_records: int = 52) -> List[dict]:
     """
     去重合并：将新采集的详细格式数据合并到历史（3字段格式）
@@ -524,6 +565,21 @@ def main():
     # Step 1: 从 GitHub Releases 下载历史数据
     print("\n[1/5] 从 GitHub Releases 下载历史数据...")
     history = download_history_from_github()
+
+    # 合并本地 CSV 历史数据（保险起见，每次都合并）
+    print("\n[1.5/5] 合并本地 CSV 历史数据...")
+    csv_history = load_history_from_csv()
+    if csv_history:
+        # 直接去重合并（两个都是3字段格式）
+        existing = {r["period"] for r in history}
+        added = 0
+        for rec in csv_history:
+            if rec["period"] not in existing:
+                history.append(rec)
+                existing.add(rec["period"])
+                added += 1
+        history.sort(key=lambda x: x["period"], reverse=True)
+        print(f"  ✅ 合并后共 {len(history)} 条（新增 {added} 条）")
 
     # Step 2: 爬取最新一期数据
     print("\n[2/5] 爬取最新一周数据...")
