@@ -3,17 +3,20 @@
 中国生鲜乳（原奶）主产区价格采集 - 每日推送脚本
 ==============================================
 
-整合功能：
-1. 采集最新一期数据（复用 scraper.py 的鲁棒解析逻辑）
-2. 保存 CSV + 生成 history.json（3字段格式）
-3. 推送到企业微信（push.showdoc API）
-4. Git commit & push 到 GitHub（数据版本管理）
-5. 支持 GitHub Actions 自动运行
+完整工作流（同原项目 push.py）：
+1. 从 GitHub Releases 下载 history.json（历史数据）
+2. 爬取最新一期数据（双源鲁棒解析）
+3. 去重合并到历史数据
+4. 上传 history.json 到 GitHub Releases
+5. 推送到企业微信（最近7周数据）
+
+数据格式：3字段（period / price / yoy）同原项目
+存储方式：GitHub Releases 附件（稳定URL直接访问）
 
 用法:
-    python daily_push.py              # 采集最新一期 + 推送
-    python daily_push.py --no-push   # 只采集，不推送
-    python daily_push.py --history 10 # 回溯10期 + 推送
+    python daily_push.py              # 完整流程
+    python daily_push.py --no-push   # 只采集上传，不推送
+    python daily_push.py --no-upload # 只采集推送，不上传Releases
 """
 
 import os
@@ -21,7 +24,6 @@ import re
 import sys
 import time
 import json
-import csv
 import argparse
 import logging
 import subprocess
@@ -33,7 +35,7 @@ import requests
 from bs4 import BeautifulSoup
 
 # ── 配置 ──────────────────────────────────────────────────
-# 数据源（同 scraper.py 的鲁棒双源架构）
+# 数据采集源（双源容错，同方案A）
 SOURCES = {
     "moa": {
         "list_url": "https://xmsyj.moa.gov.cn/jcyj/",
@@ -43,16 +45,18 @@ SOURCES = {
     },
 }
 DATA_DIR = Path(__file__).parent / "data"
-CSV_FILE = DATA_DIR / "raw_milk_price.csv"
 HISTORY_JSON = DATA_DIR / "history.json"
 REQUEST_TIMEOUT = 30
 REQUEST_DELAY = 1.5
 
+# GitHub 配置（用于 Releases 上传/下载）
+REPO_OWNER = "biaozhi268"
+REPO_NAME   = "milk-price-push"
+RELEASE_TAG = "history"   # Releases 的 tag 名称
+
 # 推送配置
 PUSH_TOKEN = os.environ.get("PUSH_TOKEN", "")
 GITHUB_TOKEN = os.environ.get("MY_GITHUB_TOKEN", "")
-REPO_OWNER = "biaozhi268"
-REPO_NAME = "milk-price-push"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,11 +67,11 @@ log = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════
-# 第一部分：数据采集（复用 scraper.py 的鲁棒逻辑）
+# 第一部分：数据采集（鲁棒双源解析，同方案A）
 # ═══════════════════════════════════════════════════════
 
 def parse_week_to_date(year: int, month: int, week: int) -> str:
-    """将"X月第Y周"转换为近似日期"""
+    """将"X月第Y周"转换为近似日期（周三）"""
     first_day = datetime(year, month, 1)
     days_to_monday = (7 - first_day.weekday()) % 7
     first_monday = first_day + timedelta(days=days_to_monday)
@@ -79,7 +83,7 @@ def extract_week_info(text: str):
     m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*第\s*(\d{1,2})\s*周", text)
     if m:
         return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    m = re.search(r"(?:^[^\d]|^)(\d{1,2})\s*月\s*第\s*(\d{1,2})\s*周", text)
+    m = re.search(r"(?:^|[^\d])(\d{1,2})\s*月\s*第\s*(\d{1,2})\s*周", text)
     if m:
         return (None, int(m.group(1)), int(m.group(2)))
     return None
@@ -155,7 +159,7 @@ def _extract_from_table(soup: BeautifulSoup) -> Optional[float]:
 
 
 def parse_report_page(url: str) -> Optional[dict]:
-    """解析单篇周报页面"""
+    """解析单篇周报页面，返回详细格式 dict"""
     log.info(f"获取页面: {url}")
     try:
         resp = requests.get(url, timeout=REQUEST_TIMEOUT, headers={
@@ -266,43 +270,8 @@ def fetch_latest() -> Optional[dict]:
     return None
 
 
-def fetch_history(max_count: int = 50) -> List[dict]:
-    """回溯历史数据"""
-    results = []
-    seen_urls = set()
-    moa_cfg = SOURCES["moa"]
-
-    for page_num in range(0, 50):
-        url = moa_cfg["list_url"] if page_num == 0 else f"{moa_cfg['list_url']}index_{page_num}.htm"
-        log.info(f"扫描列表页 [{page_num}]: {url}")
-        links = _find_report_links(url)
-        if not links:
-            break
-
-        for title, full_url in links:
-            if full_url in seen_urls:
-                continue
-            seen_urls.add(full_url)
-            data = parse_report_page(full_url)
-            if data:
-                results.append(data)
-                log.info(f"  ✓ {data['报告标题'][:40]}... → {data['生鲜乳价格_元每公斤']} 元/公斤")
-            if len(results) >= max_count:
-                break
-            time.sleep(REQUEST_DELAY)
-        if len(results) >= max_count:
-            break
-
-    results.sort(key=lambda x: x.get("估算日期", ""), reverse=True)
-    return results[:max_count]
-
-
-# ═══════════════════════════════════════════════════════
-# 第二部分：数据持久化（CSV详细 + JSON简化3字段）
-# ═══════════════════════════════════════════════════════
-
 def to_simple_format(record: dict) -> dict:
-    """转换为3字段格式（同对方方案）：period / price / yoy"""
+    """转换为3字段格式（同原项目）：period / price / yoy"""
     period = record.get("估算日期", "")
     if not period:
         y, m, w = record.get("年份"), record.get("月份"), record.get("第几周")
@@ -316,75 +285,137 @@ def to_simple_format(record: dict) -> dict:
     return {"period": period, "price": price, "yoy": yoy_str}
 
 
-CSV_FIELDS = [
-    "报告标题", "年份", "月份", "第几周", "估算日期", "采集日", "发布日期",
-    "生鲜乳价格_元每公斤", "环比变化%", "同比变化%",
-    "数据来源URL", "采集时间",
-]
+# ═══════════════════════════════════════════════════════
+# 第二部分：GitHub Releases 历史数据管理
+# ═══════════════════════════════════════════════════════
+
+def download_history_from_github() -> List[dict]:
+    """
+    从 GitHub Releases 下载 history.json
+    返回3字段格式列表（period/price/yoy）
+    """
+    url = (
+        f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
+        f"/releases/download/{RELEASE_TAG}/history.json"
+    )
+    try:
+        resp = requests.get(url, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            log.info(f"[GitHub] 下载历史数据成功（{len(data)} 条）")
+            return data
+        else:
+            log.info(f"[GitHub] 历史数据不存在（HTTP {resp.status_code}），将从空开始")
+            return []
+    except Exception as e:
+        log.warning(f"[GitHub] 下载历史数据失败: {e}，将从空开始")
+        return []
 
 
-def merge_and_save_csv(new_data: List[dict]) -> int:
-    """合并新数据到 CSV（去重）"""
-    existing = []
-    if CSV_FILE.exists():
-        with open(CSV_FILE, "r", encoding="utf-8-sig", newline="") as f:
-            existing = list(csv.DictReader(f))
+def upload_history_to_github(history: List[dict]) -> bool:
+    """
+    上传 history.json 到 GitHub Releases
+    如果 Releases 不存在则创建，存在则更新附件
+    """
+    if not GITHUB_TOKEN:
+        log.warning("未设置 MY_GITHUB_TOKEN，跳过上传")
+        return False
 
-    existing_dates = {r.get("估算日期", "") for r in existing}
-    added = 0
-    for record in new_data:
-        if record.get("估算日期") and record["估算日期"] not in existing_dates:
-            existing.append(record)
-            existing_dates.add(record["估算日期"])
-            added += 1
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
 
-    existing.sort(key=lambda x: x.get("估算日期", ""), reverse=True)
+    # Step 1: 检查 Releases 是否存在
+    rel_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/tags/{RELEASE_TAG}"
+    resp = requests.get(rel_url, headers=headers, timeout=15)
+    release_id = None
+    if resp.status_code == 200:
+        release_id = resp.json()["id"]
+        log.info(f"[GitHub] Releases 已存在（id={release_id}）")
+    else:
+        # 创建 Releases
+        create_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases"
+        payload = {
+            "tag_name": RELEASE_TAG,
+            "name": "原奶价格历史数据",
+            "body": "自动更新的生鲜乳主产区周度价格历史数据（最近52周）\n\n数据来源：农业农村部畜牧兽医局",
+            "draft": False,
+            "prerelease": False,
+        }
+        r = requests.post(create_url, headers=headers, json=payload, timeout=15)
+        if r.status_code in (200, 201):
+            release_id = r.json()["id"]
+            log.info(f"[GitHub] Releases 创建成功（id={release_id}）")
+        else:
+            log.error(f"[GitHub] 创建 Releases 失败: {r.text}")
+            return False
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CSV_FILE, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(existing)
+    # Step 2: 删除旧附件（如果存在）
+    if release_id:
+        assets_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/{release_id}/assets"
+        r = requests.get(assets_url, headers=headers, timeout=15)
+        if r.status_code == 200:
+            for asset in r.json():
+                if asset["name"] == "history.json":
+                    del_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/assets/{asset['id']}"
+                    requests.delete(del_url, headers=headers, timeout=15)
+                    log.info("[GitHub] 已删除旧附件 history.json")
 
-    log.info(f"CSV 保存完成: {CSV_FILE} (新增 {added} 条, 总计 {len(existing)} 条)")
-    return added
-
-
-def save_history_json(records: List[dict], max_records: int = 52):
-    """保存为3字段格式 JSON（同对方方案）"""
+    # Step 3: 上传新文件
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(HISTORY_JSON, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
-    log.info(f"history.json 保存完成 ({len(records)} 条)")
-    return records
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+    upload_url = (
+        f"https://uploads.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+        f"/releases/{release_id}/assets?name=history.json"
+    )
+    with open(HISTORY_JSON, "rb") as f:
+        r = requests.post(
+            upload_url,
+            headers={**headers, "Content-Type": "application/json"},
+            data=f,
+            timeout=30,
+        )
+    if r.status_code in (200, 201):
+        log.info(f"[GitHub] ✅ history.json 上传成功（{len(history)} 条）")
+        return True
+    else:
+        log.error(f"[GitHub] 上传失败: {r.status_code} {r.text}")
+        return False
 
 
-def load_history_json() -> List[dict]:
-    """读取已有 history.json（3字段格式）"""
-    if not HISTORY_JSON.exists():
-        return []
-    with open(HISTORY_JSON, "r", encoding="utf-8") as f:
-        return json.load(f)
+def deduplicate_and_keep_recent(history: List[dict], new_records: List[dict], max_records: int = 52) -> List[dict]:
+    """
+    去重合并：将新采集的详细格式数据合并到历史（3字段格式）
+    保留最近 max_records 条，按 period 降序
+    """
+    # 将新数据转为3字段格式
+    new_simple = [to_simple_format(r) for r in new_records]
 
-
-def load_and_merge_history(new_data: List[dict], max_records: int = 52) -> List[dict]:
-    """将新采集的详细数据合并到 history.json（3字段格式）"""
-    existing = load_history_json()
-    existing_periods = {r["period"] for r in existing}
-
-    for record in new_data:
-        simple = to_simple_format(record)
-        if simple["period"] not in existing_periods:
-            existing.append(simple)
-            existing_periods.add(simple["period"])
+    existing_periods = {r["period"] for r in history}
+    added = 0
+    for rec in new_simple:
+        if rec["period"] not in existing_periods:
+            history.append(rec)
+            existing_periods.add(rec["period"])
+            added += 1
 
     # 按 period 降序，保留最近 max_records 条
-    existing.sort(key=lambda x: x["period"], reverse=True)
-    return existing[:max_records]
+    history.sort(key=lambda x: x["period"], reverse=True)
+    result = history[:max_records]
+
+    if added:
+        log.info(f"[合并] 新增 {added} 条，合并后共 {len(result)} 条")
+    else:
+        log.info(f"[合并] 无新增数据，历史共 {len(result)} 条")
+
+    return result
 
 
 # ═══════════════════════════════════════════════════════
-# 第三部分：企业微信推送
+# 第三部分：企业微信推送（格式完全对齐原项目）
 # ═══════════════════════════════════════════════════════
 
 def push_to_wechat(title: str, content: str, token: str) -> bool:
@@ -418,7 +449,10 @@ def build_content(history: List[dict], latest_detailed: dict = None) -> tuple:
     # ── 无新数据：推送失败通知（附缓存历史）───
     if latest_detailed is None:
         title = "⚠️ 原奶数据抓取失败"
-        content = f"# ⚠️ 原奶数据抓取失败（{today}）\n\n> 所有数据源均未获取到最新一周数据，请手动检查。\n\n"
+        content = (
+            f"# ⚠️ 原奶数据抓取失败（{today}）\n\n"
+            "> 所有数据源均未获取到最新一周数据，请手动检查。\n\n"
+        )
         if not history:
             content += "> 连缓存也没有，数据源可能长期中断。"
         else:
@@ -427,7 +461,7 @@ def build_content(history: List[dict], latest_detailed: dict = None) -> tuple:
                 content += f"- {p['period']}: {p['price']}元/kg (同比 {p['yoy']})\n"
         return title, content
 
-    # ── 有新数据 ──────────────────────────────
+    # ── 有新数据 ─────────────────────────────
     month = latest_detailed.get("月份", "")
     week  = latest_detailed.get("第几周", "")
     price = latest_detailed.get("生鲜乳价格_元每公斤")
@@ -437,13 +471,13 @@ def build_content(history: List[dict], latest_detailed: dict = None) -> tuple:
     yoy_str = f"{yoy:+.1f}%" if yoy is not None else "N/A"
     title   = f"原奶{month}月第{week}周 {price} 同比{yoy_str}"
 
-    # 构建表格行（history 是 3字段格式）
+    # 构建表格行（history 是 3字段格式，取最近7周）
     rows = []
     for p in history[:7]:
         price_str = str(p["price"]) if isinstance(p["price"], (int, float)) else p["price"]
         rows.append(f"| {p['period']} | {price_str.ljust(14)} | {p['yoy'].ljust(10)} |")
 
-    # 数据源说明
+    # 数据源说明 + 原文链接
     source_note = "\n\n> 数据来源：农业农村部畜牧兽医局"
     source_url = latest_detailed.get("数据来源URL", "")
     if source_url:
@@ -474,105 +508,64 @@ def build_content(history: List[dict], latest_detailed: dict = None) -> tuple:
 
 
 # ═══════════════════════════════════════════════════════
-# 第四部分：Git 自动同步（数据版本管理）
-# ═══════════════════════════════════════════════════════
-
-def git_commit_and_push() -> bool:
-    """Git commit & push 数据变化"""
-    try:
-        repo_dir = Path(__file__).parent
-        subprocess.run(["git", "add", "data/"], cwd=repo_dir, check=True, capture_output=True)
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
-            cwd=repo_dir, capture_output=True
-        )
-        if result.returncode == 0:
-            log.info("[Git] 数据无变化，跳过 push")
-            return True
-
-        msg = f"data: 自动更新 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        subprocess.run(["git", "commit", "-m", msg], cwd=repo_dir, check=True, capture_output=True)
-        subprocess.run(["git", "push"], cwd=repo_dir, check=True, capture_output=True)
-        log.info("[Git] ✅ 数据已推送到 GitHub")
-        return True
-    except subprocess.CalledProcessError as e:
-        log.warning(f"[Git] 推送失败: {e}")
-        return False
-
-
-# ═══════════════════════════════════════════════════════
 # 主流程
 # ═══════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(description="生鲜乳价格每日推送")
-    parser.add_argument("--history", type=int, default=0, help="回溯N期历史")
-    parser.add_argument("--all", action="store_true", help="采集全部历史")
-    parser.add_argument("--no-push", action="store_true", help="不推送到企微")
-    parser.add_argument("--no-git", action="store_true", help="不 git push")
+    parser.add_argument("--no-push",   action="store_true", help="不推送到企微")
+    parser.add_argument("--no-upload", action="store_true", help="不上传到 GitHub Releases")
     args = parser.parse_args()
 
     print("=" * 50)
     print("🥛 原奶价格采集 + 推送")
     print("=" * 50)
 
-    # Step 0: 加载已有历史数据（同原项目：先读缓存）
-    print("\n[0/5] 加载本地历史数据...")
-    history = load_history_json()
-    print(f"  ✅ 已有 {len(history)} 条历史记录")
+    # Step 1: 从 GitHub Releases 下载历史数据
+    print("\n[1/5] 从 GitHub Releases 下载历史数据...")
+    history = download_history_from_github()
 
-    # Step 1: 采集数据
-    print("\n[1/5] 采集数据...")
-    if args.history > 0:
-        data = fetch_history(max_count=args.history)
-    elif args.all:
-        data = fetch_history(max_count=9999)
+    # Step 2: 爬取最新一期数据
+    print("\n[2/5] 爬取最新一周数据...")
+    latest = fetch_latest()
+
+    if latest:
+        print(f"  ✅ 最新: {latest['估算日期']} {latest['生鲜乳价格_元每公斤']} 元/公斤")
     else:
-        result = fetch_latest()
-        data = [result] if result else []
+        print("\n⚠️ 所有数据源均未抓取到新数据")
 
-    if not data:
-        log.warning("未获取到任何新数据，使用缓存历史推送通知")
-        if not args.no_push and PUSH_TOKEN:
-            title, content = build_content(history, None)
-            push_to_wechat(title, content, PUSH_TOKEN)
-        else:
-            print("  ⚠️ 无新数据，且未设置 PUSH_TOKEN，跳过推送")
-        return
-
-    latest = data[0]
-    print(f"  ✅ 最新: {latest['估算日期']} {latest['生鲜乳价格_元每公斤']} 元/公斤")
-
-    # Step 2: 保存 CSV（详细格式）
-    print("\n[2/5] 保存 CSV...")
-    merge_and_save_csv(data)
-
-    # Step 3: 合并到 history.json（3字段格式）
+    # Step 3: 去重合并历史数据
     print("\n[3/5] 合并历史数据...")
-    history = load_and_merge_history(data)
-    save_history_json(history)
-    print(f"  ✅ 合并后共 {len(history)} 条")
+    if latest:
+        history = deduplicate_and_keep_recent(history, [latest])
+    else:
+        print("  ⚠️ 无新数据，使用缓存历史")
 
-    # Step 4: 推送
-    print("\n[4/5] 推送到企业微信...")
+    # Step 4: 上传到 GitHub Releases
+    print("\n[4/5] 上传到 GitHub Releases...")
+    if not args.no_upload:
+        upload_history_to_github(history)
+    else:
+        print("  ⏭ 跳过上传（--no-upload）")
+
+    # Step 5: 推送到企业微信
+    print("\n[5/5] 推送到企业微信...")
     if not args.no_push and PUSH_TOKEN:
         title, content = build_content(history, latest)
         push_to_wechat(title, content, PUSH_TOKEN)
     else:
         print("  ⏭ 跳过推送（--no-push 或 未设置 PUSH_TOKEN）")
 
-    # Step 5: Git 同步
-    print("\n[5/5] Git 同步...")
-    if not args.no_git:
-        git_commit_and_push()
-    else:
-        print("  ⏭ 跳过 Git push（--no-git）")
-
     # 摘要
     print("\n" + "=" * 50)
-    print(f"📋 推送标题: {title if not args.no_push else '(未推送)'}")
-    print(f"📋 最新价格: {latest['生鲜乳价格_元每公斤']} 元/公斤")
-    print(f"📋 同比: {latest.get('同比变化%', 'N/A')}")
+    if latest:
+        yoy = latest.get('同比变化%')
+        yoy_s = f"{yoy:+.1f}%" if yoy is not None else "N/A"
+        print(f"📋 推送标题: 原奶{latest['月份']}月第{latest['第几周']}周 {latest['生鲜乳价格_元每公斤']} 同比{yoy_s}")
+    else:
+        print("📋 无新数据，已推送失败通知")
+    print(f"📋 历史数据: 共 {len(history)} 条")
+    print(f"📋 稳定访问: https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/tag/{RELEASE_TAG}")
     print("=" * 50)
 
 

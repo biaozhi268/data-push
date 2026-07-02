@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+scraper.py.bak
+
+# 本地数据缓存（Releases 为权威存储）
+data/
