@@ -539,11 +539,15 @@ def build_content(history: List[dict], latest_detailed: dict = None) -> tuple:
         price_str = str(p["price"]) if isinstance(p["price"], (int, float)) else p["price"]
         rows.append(f"| {p['period']} | {price_str.ljust(14)} | {p['yoy'].ljust(10)} |")
 
-    # 数据源说明 + 原文链接
+    # 数据源说明 + 原文链接 + 发布时间
     source_note = "\n\n> 数据来源：农业农村部畜牧兽医局"
+    publish_date = latest_detailed.get("发布日期", "")
+    if publish_date:
+        source_note += f"  |  发布时间：{publish_date}"
     source_url = latest_detailed.get("数据来源URL", "")
     if source_url:
-        source_note += f"  [查看原文]({source_url})"
+        # HTML 格式，支持 target="_blank" 在新窗口打开
+        source_note += f'  |  <a href="{source_url}" target="_blank">查看原文</a>'
 
     # 近期趋势
     prices_valid = [
