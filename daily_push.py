@@ -407,42 +407,69 @@ def push_to_wechat(title: str, content: str, token: str) -> bool:
         return False
 
 
-def build_push_content(latest: dict, history: List[dict]) -> tuple:
-    """构建推送的标题和内容（Markdown格式）"""
-    price = latest.get("生鲜乳价格_元每公斤")
-    yoy = latest.get("同比变化%")
-    month = latest.get("月份", "")
-    week = latest.get("第几周", "")
-    period = latest.get("估算日期", "")
+def build_content(history: List[dict], latest_detailed: dict = None) -> tuple:
+    """
+    构建推送标题和内容（完全对齐原项目 push.py 的 build_content 格式）
+    - history: 3字段格式列表（period/price/yoy），按 period 降序
+    - latest_detailed: 最新一期详细格式（含月份/周次/数据源URL）
+    """
+    today = datetime.now().strftime('%Y-%m-%d')
 
+    # ── 无新数据：推送失败通知（附缓存历史）───
+    if latest_detailed is None:
+        title = "⚠️ 原奶数据抓取失败"
+        content = f"# ⚠️ 原奶数据抓取失败（{today}）\n\n> 所有数据源均未获取到最新一周数据，请手动检查。\n\n"
+        if not history:
+            content += "> 连缓存也没有，数据源可能长期中断。"
+        else:
+            content += "最近缓存数据（最近7周）：\n"
+            for p in history[:7]:
+                content += f"- {p['period']}: {p['price']}元/kg (同比 {p['yoy']})\n"
+        return title, content
+
+    # ── 有新数据 ──────────────────────────────
+    month = latest_detailed.get("月份", "")
+    week  = latest_detailed.get("第几周", "")
+    price = latest_detailed.get("生鲜乳价格_元每公斤")
+    yoy   = latest_detailed.get("同比变化%")
+
+    # 标题（同原项目格式）
     yoy_str = f"{yoy:+.1f}%" if yoy is not None else "N/A"
-    title = f"原奶{month}月第{week}周 {price} 同比{yoy_str}"
+    title   = f"原奶{month}月第{week}周 {price} 同比{yoy_str}"
 
-    # Markdown 内容
-    content = f"# 🥛 原奶收购价周报\n\n"
-    content += f"**最新价格**: {price} 元/公斤\n"
-    content += f"**同比变化**: {yoy_str}\n"
-    content += f"**报告期**: {period}\n\n"
+    # 构建表格行（history 是 3字段格式）
+    rows = []
+    for p in history[:7]:
+        price_str = str(p["price"]) if isinstance(p["price"], (int, float)) else p["price"]
+        rows.append(f"| {p['period']} | {price_str.ljust(14)} | {p['yoy'].ljust(10)} |")
 
-    content += "## 最近7周数据\n\n"
+    # 数据源说明
+    source_note = "\n\n> 数据来源：农业农村部畜牧兽医局"
+    source_url = latest_detailed.get("数据来源URL", "")
+    if source_url:
+        source_note += f"  [查看原文]({source_url})"
+
+    # 近期趋势
+    prices_valid = [
+        p["price"] for p in history
+        if isinstance(p.get("price"), (int, float)) and p["price"] != "N/A"
+    ]
+    trend = ""
+    if prices_valid:
+        trend = (
+            f"\n\n📊 近期趋势：价格维持在 "
+            f"{min(prices_valid):.2f}-{max(prices_valid):.2f} "
+            f"元/kg 区间，整体处于低位磨底阶段。"
+        )
+
+    # 拼接完整内容（同原项目格式）
+    content  = "# 🥛 原奶收购价周报\n\n"
     content += "| 日期 | 均价（元/kg） | 同比变化 |\n"
     content += "| ----- | --------------- | ---------- |\n"
+    content += "\n".join(rows) + "\n"
+    content += source_note
+    content += trend
 
-    for r in history[:7]:
-        s = to_simple_format(r)
-        content += f"| {s['period']} | {s['price']} | {s['yoy']} |\n"
-
-    # 趋势分析
-    prices = [r.get("生鲜乳价格_元每公斤") for r in history[:7] if r.get("生鲜乳价格_元每公斤")]
-    if prices:
-        content += f"\n> 📊 近期趋势：价格在 {min(prices):.2f}-{max(prices):.2f} 元/kg 区间\n"
-
-    # 数据源超链接
-    source_url = latest.get("数据来源URL", "")
-    if source_url:
-        content += f"\n📎 [查看原文]({source_url})"
-    else:
-        content += "\n> 数据来源：农业农村部畜牧兽医局"
     return title, content
 
 
@@ -489,8 +516,13 @@ def main():
     print("🥛 原奶价格采集 + 推送")
     print("=" * 50)
 
+    # Step 0: 加载已有历史数据（同原项目：先读缓存）
+    print("\n[0/5] 加载本地历史数据...")
+    history = load_history_json()
+    print(f"  ✅ 已有 {len(history)} 条历史记录")
+
     # Step 1: 采集数据
-    print("\n[1/4] 采集数据...")
+    print("\n[1/5] 采集数据...")
     if args.history > 0:
         data = fetch_history(max_count=args.history)
     elif args.all:
@@ -500,37 +532,37 @@ def main():
         data = [result] if result else []
 
     if not data:
-        log.error("未获取到任何数据")
-        # 推送失败通知
+        log.warning("未获取到任何新数据，使用缓存历史推送通知")
         if not args.no_push and PUSH_TOKEN:
-            push_to_wechat(
-                "⚠️ 原奶数据抓取失败",
-                f"# ⚠️ 原奶数据抓取失败（{datetime.now().strftime('%Y-%m-%d')}）\n\n所有数据源均未获取到最新一周数据，请手动检查。",
-                PUSH_TOKEN
-            )
+            title, content = build_content(history, None)
+            push_to_wechat(title, content, PUSH_TOKEN)
+        else:
+            print("  ⚠️ 无新数据，且未设置 PUSH_TOKEN，跳过推送")
         return
 
     latest = data[0]
     print(f"  ✅ 最新: {latest['估算日期']} {latest['生鲜乳价格_元每公斤']} 元/公斤")
 
-    # Step 2: 保存数据
-    print("\n[2/4] 保存数据...")
-    added = merge_and_save_csv(data)
+    # Step 2: 保存 CSV（详细格式）
+    print("\n[2/5] 保存 CSV...")
+    merge_and_save_csv(data)
 
-    # 合并到 history.json（保留最近52周）
+    # Step 3: 合并到 history.json（3字段格式）
+    print("\n[3/5] 合并历史数据...")
     history = load_and_merge_history(data)
     save_history_json(history)
+    print(f"  ✅ 合并后共 {len(history)} 条")
 
-    # Step 3: 推送
-    print("\n[3/4] 推送到企业微信...")
+    # Step 4: 推送
+    print("\n[4/5] 推送到企业微信...")
     if not args.no_push and PUSH_TOKEN:
-        title, content = build_push_content(latest, data)
+        title, content = build_content(history, latest)
         push_to_wechat(title, content, PUSH_TOKEN)
     else:
         print("  ⏭ 跳过推送（--no-push 或 未设置 PUSH_TOKEN）")
 
-    # Step 4: Git 同步
-    print("\n[4/4] Git 同步...")
+    # Step 5: Git 同步
+    print("\n[5/5] Git 同步...")
     if not args.no_git:
         git_commit_and_push()
     else:
