@@ -437,7 +437,12 @@ def build_push_content(latest: dict, history: List[dict]) -> tuple:
     if prices:
         content += f"\n> 📊 近期趋势：价格在 {min(prices):.2f}-{max(prices):.2f} 元/kg 区间\n"
 
-    content += "\n> 数据来源：农业农村部畜牧兽医局"
+    # 数据源超链接
+    source_url = latest.get("数据来源URL", "")
+    if source_url:
+        content += f"\n📎 [查看原文]({source_url})"
+    else:
+        content += "\n> 数据来源：农业农村部畜牧兽医局"
     return title, content
 
 
