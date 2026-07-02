@@ -257,12 +257,33 @@ def _find_report_links(list_url: str) -> list:
     return links
 
 
+def _sort_links_by_date(links: list) -> list:
+    """
+    对链接按日期降序排列（最新的在前）
+    从 URL 中的日期路径（如 /2026/07/t20260701_xxxx.htm）提取日期
+    """
+    def _key(item):
+        _text, url = item
+        # 从 URL 提取日期：/YYYY/MM/tYYYYMM01_xxxx.htm
+        m = re.search(r"/(\d{4})/(\d{2})/t\1\2(\d{2})", url)
+        if m:
+            return int(m.group(1) + m.group(2) + m.group(3))
+        # 降级：从标题提取"X月第Y周"
+        m2 = re.search(r"(\d{4})年(\d{1,2})月第(\d{1,2})周", _text)
+        if m2:
+            return int(m2.group(1) + m2.group(2).zfill(2) + m2.group(3).zfill(2))
+        return 0
+    return sorted(links, key=_key, reverse=True)
+
+
 def fetch_latest() -> Optional[dict]:
-    """获取最新一期（双源容错）"""
+    """获取最新一期（双源容错，取日期最新的链接）"""
     for source_name, cfg in SOURCES.items():
         links = _find_report_links(cfg["list_url"])
         if not links:
             continue
+        # 按日期排序，取最新的
+        links = _sort_links_by_date(links)
         title, url = links[0]
         log.info(f"  使用 {source_name} 源: {title[:40]}...")
         data = parse_report_page(url)
