@@ -409,8 +409,8 @@ def build_content(history: List[dict], latest: dict = None) -> tuple:
         if not history:
             content += "> 连缓存也没有，数据源可能长期中断。"
         else:
-            content += "最近缓存数据（最近10条）：\n"
-            for p in history[:10]:
+            content += "最近缓存数据（最近7条）：\n"
+            for p in history[:7]:
                 change_str = f"{p['change']:+.0f}" if isinstance(p.get("change"), (int, float)) else "0"
                 cp_str = f"{p['change_percent']:+.1f}%" if isinstance(p.get("change_percent"), (int, float)) else "0%"
                 content += f"- {p['date']}: {p['price']:.0f}元/吨 (涨跌{change_str}元, {cp_str})\n"
@@ -423,9 +423,9 @@ def build_content(history: List[dict], latest: dict = None) -> tuple:
 
     title = f"R32 {latest['date']} {price:.0f}元/吨 涨跌{change:+.0f}元"
 
-    # 构建表格行（取最近10条）
+    # 构建表格行（取最近7条）
     rows = []
-    for p in history[:10]:
+    for p in history[:7]:
         price_str = f"{p['price']:.0f}" if isinstance(p.get("price"), (int, float)) else str(p["price"])
         change_str = f"{p['change']:+.0f}" if isinstance(p.get("change"), (int, float)) else "0"
         cp_str = f"{p['change_percent']:+.1f}%" if isinstance(p.get("change_percent"), (int, float)) else "0%"
