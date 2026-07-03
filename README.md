@@ -6,7 +6,7 @@
 
 | 项目 | 脚本 | 数据来源 | 更新频率 | 历史保留 |
 |------|------|----------|----------|----------|
-| 原奶价格 | `daily_push.py` | 农业农村部畜牧兽医局周报 | 每天 08:00 | 最近52周 |
+| 原奶价格 | `daily_push.py` | 农业农村部畜牧兽医局周报 | 每天 08:00 | 最近10年 |
 | R32制冷剂 | `r32_push.py` | sci99.com 价格监控 | 每天 08:00 | 最近3年 |
 
 ## 工作流（两者一致）
@@ -27,8 +27,8 @@ GitHub Actions 定时触发
 
 | 项目 | Release Tag | 文件名 | 稳定访问 URL |
 |------|-------------|--------|-------------|
-| 原奶 | `history` | `history.csv` | `https://github.com/biaozhi268/数据推送/releases/download/history/history.csv` |
-| R32 | `r32-history` | `r32_history.csv` | `https://github.com/biaozhi268/数据推送/releases/download/r32-history/r32_history.csv` |
+| 原奶 | `history` | `history.csv` | `https://github.com/biaozhi268/data-push/releases/download/history/history.csv` |
+| R32 | `r32-history` | `r32_history.csv` | `https://github.com/biaozhi268/data-push/releases/download/r32-history/r32_history.csv` |
 
 ## 数据格式
 
@@ -99,7 +99,7 @@ python r32_push.py --no-upload       # 只采集推送，不上传 Releases
 
 ## 配置 GitHub Secrets
 
-在 [仓库设置 → Secrets → Actions](https://github.com/biaozhi268/数据推送/settings/secrets/actions) 中添加：
+在 [仓库设置 → Secrets → Actions](https://github.com/biaozhi268/data-push/settings/secrets/actions) 中添加：
 
 1. **`MY_GITHUB_TOKEN`** — GitHub PAT（需 `repo` 权限），用于 Actions 自动上传 Releases
 2. **`PUSH_TOKEN`** — push.showdoc.com.cn 的 token，用于推送企业微信通知

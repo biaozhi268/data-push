@@ -42,7 +42,7 @@ REQUEST_TIMEOUT = 30
 
 # GitHub 配置（用于 Releases 上传/下载）
 REPO_OWNER = "biaozhi268"
-REPO_NAME   = "数据推送"
+REPO_NAME   = "data-push"
 RELEASE_TAG = "r32-history"
 
 # 推送配置（与奶价共用 PUSH_TOKEN）
@@ -449,7 +449,7 @@ def build_content(history: List[dict], latest: dict = None) -> tuple:
     content += "| 日期 | 价格(元/吨) | 涨跌(元) | 涨跌幅 |\n"
     content += "| ----- | ------------ | --------- | -------- |\n"
     content += "\n".join(rows) + "\n"
-    content += "\n> 数据来源：sci99.com"
+    content += '\n> 数据来源：<a href="https://www.sci99.com/monitor-1572-0.html" target="_blank">sci99.com R32价格监控</a>'
     content += trend
 
     return title, content

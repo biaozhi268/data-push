@@ -47,7 +47,7 @@ REQUEST_TIMEOUT = 30
 
 # GitHub 配置（用于 Releases 上传/下载）
 REPO_OWNER = "biaozhi268"
-REPO_NAME   = "数据推送"
+REPO_NAME   = "data-push"
 RELEASE_TAG = "history"
 
 # 推送配置
@@ -436,7 +436,7 @@ def upload_history_to_github(history: List[dict]) -> bool:
         payload = {
             "tag_name": RELEASE_TAG,
             "name": "原奶价格历史数据",
-            "body": "自动更新的生鲜乳主产区周度价格历史数据（最近52周）\n\n数据来源：农业农村部畜牧兽医局",
+            "body": "自动更新的生鲜乳主产区周度价格历史数据（最近10年）\n\n数据来源：农业农村部畜牧兽医局",
             "draft": False,
             "prerelease": False,
         }
@@ -524,10 +524,10 @@ def load_history_from_csv() -> list:
     return unique
 
 
-def deduplicate_and_keep_recent(history: List[dict], new_records: List[dict], max_records: int = 52) -> List[dict]:
+def deduplicate_and_keep_recent(history: List[dict], new_records: List[dict], max_records: int = 520) -> List[dict]:
     """
     去重合并：将新采集的详细格式数据合并到历史（3字段格式）
-    保留最近 max_records 条，按 period 降序
+    保留最近 max_records 条（默认520周≈10年），按 period 降序
     """
     new_simple = [to_simple_format(r) for r in new_records]
 
