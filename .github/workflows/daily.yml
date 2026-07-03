@@ -2,7 +2,7 @@ name: 每日原奶价格采集推送
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 每天 UTC 0:00 = 北京时间 8:00
+    - cron: '30 22 * * *'  # 每天 UTC 22:30 = 北京时间 6:30（避开整点高峰，提前处理排队延迟）
   workflow_dispatch:       # 允许手动触发
 
 jobs:

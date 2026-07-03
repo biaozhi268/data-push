@@ -2,7 +2,7 @@ name: 每日 R32 价格采集推送
 
 on:
   schedule:
-    - cron: '0 0 * * *'   # 每天 UTC 0:00 = 北京时间 8:00
+    - cron: '45 22 * * *'   # 每天 UTC 22:45 = 北京时间 6:45（错开奶价3分钟，减轻排队压力）
   workflow_dispatch:       # 允许手动触发
 
 jobs:
