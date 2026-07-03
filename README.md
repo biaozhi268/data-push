@@ -15,28 +15,27 @@
 ```
 GitHub Actions (每天 08:00 北京时间)
     │
-    ├─ 1. 从 Releases 下载 history.json（历史数据）
+    ├─ 1. 从 Releases 下载 history.csv（历史数据）
     ├─ 2. 爬取农业农村部最新一期周报
     ├─ 3. 去重合并（period 去重，保留最近52周）
-    ├─ 4. 上传 history.json 到 GitHub Releases
+    ├─ 4. 上传 history.csv 到 GitHub Releases
     └─ 5. 推送到企业微信（最近7周数据 + 原文链接）
 ```
 
 ### 数据存储
 
-历史数据存储在 [GitHub Releases](https://github.com/biaozhi268/milk-price-push/releases/tag/history) 附件中，可通过稳定 URL 直接访问：
+历史数据存储在 [GitHub Releases](https://github.com/biaozhi268/milk-price-push/releases/tag/history) 附件中（CSV 格式），可通过稳定 URL 直接访问：
 
 ```
-https://github.com/biaozhi268/milk-price-push/releases/download/history/history.json
+https://github.com/biaozhi268/milk-price-push/releases/download/history/history.csv
 ```
 
-### 数据格式（3字段）
+### 数据格式（CSV，3字段）
 
-```json
-[
-  {"period": "2026-06-25", "price": 3.03, "yoy": "-0.3%"},
-  {"period": "2026-06-18", "price": 3.03, "yoy": "-0.3%"}
-]
+```csv
+period,price,yoy
+2026-06-25,3.03,-0.3%
+2026-06-18,3.03,-0.3%
 ```
 
 | 字段 | 说明 |

@@ -4,13 +4,13 @@
 ==============================================
 
 完整工作流：
-1. 从 GitHub Releases 下载 history.json（历史数据）
+1. 从 GitHub Releases 下载 history.csv（历史数据）
 2. 爬取最新一期数据（双源鲁棒解析）
 3. 去重合并到历史数据
-4. 上传 history.json 到 GitHub Releases
+4. 上传 history.csv 到 GitHub Releases
 5. 推送到企业微信（最近7周数据）
 
-数据格式：3字段（period / price / yoy）
+数据格式：3字段（period / price / yoy），CSV 存储
 存储方式：GitHub Releases 附件（稳定URL直接访问）
 
 用法:
@@ -22,7 +22,6 @@
 import os
 import re
 import csv
-import json
 import argparse
 import logging
 from datetime import datetime, timedelta
@@ -42,7 +41,8 @@ SOURCES = {
     },
 }
 DATA_DIR = Path(__file__).parent / "data"
-HISTORY_JSON = DATA_DIR / "history.json"
+HISTORY_CSV = DATA_DIR / "history.csv"
+HISTORY_FIELDS = ["period", "price", "yoy"]
 REQUEST_TIMEOUT = 30
 
 # GitHub 配置（用于 Releases 上传/下载）
@@ -312,16 +312,98 @@ def to_simple_format(record: dict) -> dict:
 # ═══════════════════════════════════════════════════════
 
 def download_history_from_github() -> List[dict]:
-    """从 GitHub Releases 下载 history.json（3字段格式）"""
-    url = (
+    """从 GitHub Releases 下载历史数据（CSV 格式，兼容旧 JSON）"""
+    # 优先用 API 下载（不受 CDN 缓存影响）
+    if GITHUB_TOKEN:
+        api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/tags/{RELEASE_TAG}"
+        try:
+            resp = _http.get(api_url, headers={
+                "Authorization": f"token {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github+json",
+            }, timeout=15)
+            if resp.status_code == 200:
+                assets = resp.json().get("assets", [])
+                for asset in assets:
+                    if asset["name"] == "history.csv":
+                        dl_resp = _http.get(
+                            f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/assets/{asset['id']}",
+                            headers={
+                                "Authorization": f"token {GITHUB_TOKEN}",
+                                "Accept": "application/octet-stream",
+                            },
+                            timeout=15,
+                        )
+                        if dl_resp.status_code == 200:
+                            reader = csv.DictReader(dl_resp.text.splitlines())
+                            data = []
+                            for row in reader:
+                                price_raw = row.get("price", "")
+                                try:
+                                    price = float(price_raw)
+                                except (ValueError, TypeError):
+                                    price = price_raw or "N/A"
+                                data.append({
+                                    "period": row.get("period", ""),
+                                    "price": price,
+                                    "yoy": row.get("yoy", "N/A"),
+                                })
+                            log.info(f"[GitHub] 下载历史数据成功（CSV，{len(data)} 条）")
+                            return data
+                    elif asset["name"] == "history.json":
+                        # 兼容旧 JSON 格式（自动迁移）
+                        dl_resp = _http.get(
+                            f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/assets/{asset['id']}",
+                            headers={
+                                "Authorization": f"token {GITHUB_TOKEN}",
+                                "Accept": "application/octet-stream",
+                            },
+                            timeout=15,
+                        )
+                        if dl_resp.status_code == 200:
+                            import json
+                            data = dl_resp.json()
+                            log.info(f"[GitHub] 下载历史数据成功（旧 JSON，{len(data)} 条），将自动迁移为 CSV")
+                            return data
+        except Exception as e:
+            log.warning(f"[GitHub] API 下载失败: {e}")
+
+    # 公共 URL 备选（不依赖 token，但可能受 CDN 缓存影响）
+    csv_url = (
+        f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
+        f"/releases/download/{RELEASE_TAG}/history.csv"
+    )
+    try:
+        resp = _http.get(csv_url, timeout=15)
+        if resp.status_code == 200:
+            reader = csv.DictReader(resp.text.splitlines())
+            data = []
+            for row in reader:
+                price_raw = row.get("price", "")
+                try:
+                    price = float(price_raw)
+                except (ValueError, TypeError):
+                    price = price_raw or "N/A"
+                data.append({
+                    "period": row.get("period", ""),
+                    "price": price,
+                    "yoy": row.get("yoy", "N/A"),
+                })
+            log.info(f"[GitHub] 下载历史数据成功（CSV，{len(data)} 条）")
+            return data
+    except Exception as e:
+        log.warning(f"[GitHub] 下载 CSV 失败: {e}")
+
+    # 兼容旧 JSON 格式
+    json_url = (
         f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
         f"/releases/download/{RELEASE_TAG}/history.json"
     )
     try:
-        resp = _http.get(url, timeout=15)
+        resp = _http.get(json_url, timeout=15)
         if resp.status_code == 200:
+            import json
             data = resp.json()
-            log.info(f"[GitHub] 下载历史数据成功（{len(data)} 条）")
+            log.info(f"[GitHub] 下载历史数据成功（旧 JSON，{len(data)} 条），将自动迁移为 CSV")
             return data
         else:
             log.info(f"[GitHub] 历史数据不存在（HTTP {resp.status_code}），将从空开始")
@@ -332,7 +414,7 @@ def download_history_from_github() -> List[dict]:
 
 
 def upload_history_to_github(history: List[dict]) -> bool:
-    """上传 history.json 到 GitHub Releases（不存在则创建，存在则更新）"""
+    """上传 history.csv 到 GitHub Releases（不存在则创建，存在则更新）"""
     if not GITHUB_TOKEN:
         log.warning("未设置 MY_GITHUB_TOKEN，跳过上传")
         return False
@@ -366,35 +448,38 @@ def upload_history_to_github(history: List[dict]) -> bool:
             log.error(f"[GitHub] 创建 Releases 失败: {r.text}")
             return False
 
-    # Step 2: 删除旧附件（如果存在）
+    # Step 2: 删除旧附件（兼容 history.csv 和旧 history.json）
     if release_id:
         assets_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/{release_id}/assets"
         r = _http.get(assets_url, headers=headers, timeout=15)
         if r.status_code == 200:
             for asset in r.json():
-                if asset["name"] == "history.json":
+                if asset["name"] in ("history.csv", "history.json"):
                     del_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/assets/{asset['id']}"
                     _http.delete(del_url, headers=headers, timeout=15)
-                    log.info("[GitHub] 已删除旧附件 history.json")
+                    log.info(f"[GitHub] 已删除旧附件 {asset['name']}")
 
-    # Step 3: 上传新文件
+    # Step 3: 写 CSV 并上传
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(HISTORY_JSON, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
+    with open(HISTORY_CSV, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=HISTORY_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for rec in history:
+            writer.writerow(rec)
 
     upload_url = (
         f"https://uploads.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
-        f"/releases/{release_id}/assets?name=history.json"
+        f"/releases/{release_id}/assets?name=history.csv"
     )
-    with open(HISTORY_JSON, "rb") as f:
+    with open(HISTORY_CSV, "rb") as f:
         r = _http.post(
             upload_url,
-            headers={**headers, "Content-Type": "application/json"},
+            headers={**headers, "Content-Type": "text/csv"},
             data=f,
             timeout=30,
         )
     if r.status_code in (200, 201):
-        log.info(f"[GitHub] history.json 上传成功（{len(history)} 条）")
+        log.info(f"[GitHub] history.csv 上传成功（{len(history)} 条）")
         return True
     else:
         log.error(f"[GitHub] 上传失败: {r.status_code} {r.text}")
@@ -403,29 +488,28 @@ def upload_history_to_github(history: List[dict]) -> bool:
 
 def load_history_from_csv() -> list:
     """
-    从本地 CSV 恢复历史数据（本地开发用，Actions 环境无 CSV 文件）
-    将 CSV 的详细格式转为 3字段格式
+    从本地 history.csv 恢复历史数据（本地开发用，Actions 环境无此文件）
+    读取 3字段格式 CSV
     """
-    csv_path = DATA_DIR / "raw_milk_price.csv"
-    if not csv_path.exists():
+    if not HISTORY_CSV.exists():
         return []
 
     history = []
-    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+    with open(HISTORY_CSV, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            price_raw = row.get("price", "")
             try:
-                yoy_raw = row.get("同比变化%", "").strip()
-                yoy_str = (yoy_raw + "%") if yoy_raw and yoy_raw != "N/A" else "N/A"
-                rec = {
-                    "period": row.get("估算日期", "").strip(),
-                    "price": float(row["生鲜乳价格_元每公斤"]) if row.get("生鲜乳价格_元每公斤") else "N/A",
-                    "yoy": yoy_str,
-                }
-                if rec["period"]:
-                    history.append(rec)
-            except Exception as e:
-                log.warning(f"CSV 行转换失败: {e}")
+                price = float(price_raw)
+            except (ValueError, TypeError):
+                price = price_raw or "N/A"
+            rec = {
+                "period": row.get("period", "").strip(),
+                "price": price,
+                "yoy": row.get("yoy", "N/A"),
+            }
+            if rec["period"]:
+                history.append(rec)
 
     # 去重 + 按 period 降序
     seen = set()
@@ -436,7 +520,7 @@ def load_history_from_csv() -> list:
             unique.append(r)
     unique.sort(key=lambda x: x["period"], reverse=True)
 
-    log.info(f"[CSV] 从本地 CSV 恢复历史数据（{len(unique)} 条）")
+    log.info(f"[CSV] 从本地 history.csv 恢复历史数据（{len(unique)} 条）")
     return unique
 
 
