@@ -47,7 +47,7 @@ REQUEST_TIMEOUT = 30
 
 # GitHub 配置（用于 Releases 上传/下载）
 REPO_OWNER = "biaozhi268"
-REPO_NAME   = "milk-price-push"
+REPO_NAME   = "数据推送"
 RELEASE_TAG = "history"
 
 # 推送配置

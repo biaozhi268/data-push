@@ -1,0 +1,27 @@
+name: 每日 R32 价格采集推送
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 每天 UTC 0:00 = 北京时间 8:00
+  workflow_dispatch:       # 允许手动触发
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run R32 push script
+        env:
+          PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+          MY_GITHUB_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
+        run: python r32_push.py
