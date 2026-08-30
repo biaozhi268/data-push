@@ -8,10 +8,14 @@
 2. 爬取最新一期数据（双源鲁棒解析）
 3. 去重合并到历史数据
 4. 上传 history.csv 到 GitHub Releases
-5. 推送到企业微信（最近7周数据）
+5. 推送到 ShowDoc（最近7周数据 + 可点击数据源链接）
 
 数据格式：3字段（period / price / yoy），CSV 存储
 存储方式：GitHub Releases 附件（稳定URL直接访问）
+
+退出码:
+    0  正常
+    1  数据源抓取失败（Actions 会标红）
 
 用法:
     python daily_push.py              # 完整流程
@@ -20,6 +24,7 @@
 """
 
 import os
+import sys
 import re
 import csv
 import argparse
@@ -413,6 +418,43 @@ def download_history_from_github() -> List[dict]:
         return []
 
 
+LEGACY_ASSET_NAMES = {"history.csv", "history.json"}  # 旧 JSON 格式兼容清理用
+
+
+def _upload_asset(release_id: int, file_path: Path, name: str, headers: dict):
+    """上传单个附件到指定 Release"""
+    upload_url = (
+        f"https://uploads.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+        f"/releases/{release_id}/assets?name={name}"
+    )
+    with open(file_path, "rb") as f:
+        return _http.post(
+            upload_url,
+            headers={**headers, "Content-Type": "text/csv"},
+            data=f,
+            timeout=60,
+        )
+
+
+def _delete_legacy_assets(release_id: int, headers: dict, keep: set):
+    """删除 Release 下的历史数据附件，keep 中的文件名保留"""
+    assets_url = (
+        f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+        f"/releases/{release_id}/assets"
+    )
+    r = _http.get(assets_url, headers=headers, timeout=15)
+    if r.status_code != 200:
+        return
+    for asset in r.json():
+        if asset["name"] in LEGACY_ASSET_NAMES and asset["name"] not in keep:
+            del_url = (
+                f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+                f"/releases/assets/{asset['id']}"
+            )
+            _http.delete(del_url, headers=headers, timeout=15)
+            log.info(f"[GitHub] 已删除旧附件 {asset['name']}")
+
+
 def upload_history_to_github(history: List[dict]) -> bool:
     """上传 history.csv 到 GitHub Releases（不存在则创建，存在则更新）"""
     if not GITHUB_TOKEN:
@@ -448,18 +490,7 @@ def upload_history_to_github(history: List[dict]) -> bool:
             log.error(f"[GitHub] 创建 Releases 失败: {r.text}")
             return False
 
-    # Step 2: 删除旧附件（兼容 history.csv 和旧 history.json）
-    if release_id:
-        assets_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/{release_id}/assets"
-        r = _http.get(assets_url, headers=headers, timeout=15)
-        if r.status_code == 200:
-            for asset in r.json():
-                if asset["name"] in ("history.csv", "history.json"):
-                    del_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/assets/{asset['id']}"
-                    _http.delete(del_url, headers=headers, timeout=15)
-                    log.info(f"[GitHub] 已删除旧附件 {asset['name']}")
-
-    # Step 3: 写 CSV 并上传
+    # Step 2: 写 CSV
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(HISTORY_CSV, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=HISTORY_FIELDS, extrasaction="ignore")
@@ -467,23 +498,27 @@ def upload_history_to_github(history: List[dict]) -> bool:
         for rec in history:
             writer.writerow(rec)
 
-    upload_url = (
-        f"https://uploads.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
-        f"/releases/{release_id}/assets?name=history.csv"
-    )
-    with open(HISTORY_CSV, "rb") as f:
-        r = _http.post(
-            upload_url,
-            headers={**headers, "Content-Type": "text/csv"},
-            data=f,
-            timeout=30,
-        )
+    # Step 3: 先尝试直接上传。只有确认遇到同名冲突（422）时才删除旧附件，
+    #         避免"旧的删了、新的没传上"导致 Releases 里的历史数据彻底丢失。
+    r = _upload_asset(release_id, HISTORY_CSV, "history.csv", headers)
+    if r.status_code in (200, 201):
+        log.info(f"[GitHub] history.csv 上传成功（{len(history)} 条）")
+        _delete_legacy_assets(release_id, headers, keep={"history.csv"})
+        return True
+
+    if r.status_code != 422:
+        log.error(f"[GitHub] 上传失败: {r.status_code} {r.text}")
+        return False
+
+    log.info("[GitHub] 同名附件已存在，删除旧的再重传")
+    _delete_legacy_assets(release_id, headers, keep=set())
+    r = _upload_asset(release_id, HISTORY_CSV, "history.csv", headers)
     if r.status_code in (200, 201):
         log.info(f"[GitHub] history.csv 上传成功（{len(history)} 条）")
         return True
-    else:
-        log.error(f"[GitHub] 上传失败: {r.status_code} {r.text}")
-        return False
+
+    log.error(f"[GitHub] 上传失败: {r.status_code} {r.text}")
+    return False
 
 
 def load_history_from_csv() -> list:
@@ -551,7 +586,7 @@ def deduplicate_and_keep_recent(history: List[dict], new_records: List[dict], ma
 
 
 # ═══════════════════════════════════════════════════════
-# 第三部分：企业微信推送
+# 第三部分：ShowDoc 推送
 # ═══════════════════════════════════════════════════════
 
 def push_to_wechat(title: str, content: str, token: str) -> bool:
@@ -564,7 +599,7 @@ def push_to_wechat(title: str, content: str, token: str) -> bool:
         resp = _http.post(url, data={"title": title, "content": content}, timeout=15)
         result = resp.json()
         if result.get("error_code") == 0:
-            log.info("推送到企业微信成功")
+            log.info("推送到 ShowDoc 成功")
             return True
         else:
             log.error(f"推送失败: {result}")
@@ -582,12 +617,17 @@ def build_content(history: List[dict], latest_detailed: dict = None) -> tuple:
     """
     today = datetime.now().strftime('%Y-%m-%d')
 
-    # ── 无新数据：推送失败通知（附缓存历史）───
+    # ── 无新数据：推送失败通知（附数据源链接 + 缓存历史）───
     if latest_detailed is None:
         title = "原奶数据抓取失败"
+        source_links = "  |  ".join(
+            f'<a href="{cfg["list_url"]}" target="_blank">{name.upper()} 查看原文</a>'
+            for name, cfg in SOURCES.items()
+        )
         content = (
             f"# 原奶数据抓取失败（{today}）\n\n"
             "> 所有数据源均未获取到最新一周数据，请手动检查。\n\n"
+            f"> 数据来源：{source_links}\n\n"
         )
         if not history:
             content += "> 连缓存也没有，数据源可能长期中断。"
@@ -701,8 +741,8 @@ def main():
     else:
         print("  跳过上传（--no-upload）")
 
-    # Step 5: 推送到企业微信
-    print("\n[5/5] 推送到企业微信...")
+    # Step 5: 推送到 ShowDoc
+    print("\n[5/5] 推送到 ShowDoc...")
     if not args.no_push and PUSH_TOKEN:
         title, content = build_content(history, latest)
         push_to_wechat(title, content, PUSH_TOKEN)
@@ -717,10 +757,15 @@ def main():
         yoy_s = f"{yoy:+.1f}%" if yoy is not None else "N/A"
         print(f"推送标题: 原奶{latest.get('月份', '?')}月第{latest.get('第几周', '?')}周 {latest.get('生鲜乳价格_元每公斤', 'N/A')} 同比{yoy_s}")
     else:
-        print("无新数据，已推送失败通知")
+        print("数据源抓取失败，已推送失败通知")
     print(f"历史数据: 共 {len(history)} 条")
     print(f"稳定访问: https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/tag/{RELEASE_TAG}")
     print("=" * 50)
+
+    # 抓取失败时以退出码 1 结束，让 GitHub Actions 标红，不再被绿色状态掩盖
+    if latest is None:
+        log.error("数据源抓取失败，以退出码 1 结束")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
