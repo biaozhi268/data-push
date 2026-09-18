@@ -5,7 +5,8 @@
 
 完整工作流：
 1. 从 GitHub Releases 下载 history.csv（历史数据）
-2. 爬取最新一期数据（双源鲁棒解析）
+2. 爬取最新一期数据（moa 优先降级 nahs，单源内最新篇解析失败回退次新）
+2.5 与入库历史对比取最新作为推送口径（只进不退，主源偶发失败不推旧数据）
 3. 去重合并到历史数据
 4. 上传 history.csv 到 GitHub Releases
 5. 推送到 ShowDoc（最近7周数据 + 可点击数据源链接）
@@ -93,6 +94,42 @@ def parse_week_to_date(year: int, month: int, week: int) -> str:
     first_monday = first_day + timedelta(days=days_to_monday)
     target = first_monday + timedelta(days=3 + (week - 1) * 7)
     return target.strftime("%Y-%m-%d")
+
+
+def date_to_week_info(period_str: str):
+    """
+    parse_week_to_date 的逆函数：period 日期 -> (月, 周次)
+    供回退场景从 3 字段历史记录反推标题里的"X月第Y周"。
+    无法可靠反推时返回 None（调用方退化用日期格式展示）：
+    - 非周四或格式非法（period 必由正推生成，必为周四）
+    - 跨月歧义：某月第5周的周四可能落在下月初，与下月第1周的周四
+      重合，无法唯一确定原始标注，宁可退化也不猜错
+    """
+    try:
+        t = datetime.strptime(period_str, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+    if t.weekday() != 3:  # 必须是周四（parse_week_to_date 生成首个周一+3天）
+        return None
+    y, m = t.year, t.month
+    # 候选月份：本月 + 上月（第5周溢出场景）+ 下月（月初场景）
+    candidates = [(y, m)]
+    candidates.append((y - 1, 12) if m == 1 else (y, m - 1))
+    candidates.append((y + 1, 1) if m == 12 else (y, m + 1))
+    hits = []
+    for yy, mm in candidates:
+        first_day = datetime(yy, mm, 1)
+        first_monday = first_day + timedelta(days=(7 - first_day.weekday()) % 7)
+        offset = (t - first_monday).days
+        if offset < 3:
+            continue  # 早于该月第1周的周三
+        week = (offset - 3) // 7 + 1
+        if week < 1 or week > 5:
+            continue  # 官方周报周次范围仅第1~5周，排除"上月第6周"这类伪匹配
+        # 回推校验：该月第week周的周三必须正好等于原日期
+        if first_monday + timedelta(days=3 + (week - 1) * 7) == t:
+            hits.append((mm, week))
+    return hits[0] if len(hits) == 1 else None
 
 
 def extract_week_info(text: str):
@@ -283,17 +320,20 @@ def _sort_links_by_date(links: list) -> list:
 
 
 def fetch_latest() -> Optional[dict]:
-    """获取最新一期（双源容错，取日期最新的链接）"""
+    """获取最新一期（moa 优先降级 nahs；单源内最新一篇解析失败时回退次新一篇）"""
     for source_name, cfg in SOURCES.items():
         links = _find_report_links(cfg["list_url"])
         if not links:
             continue
         links = _sort_links_by_date(links)
-        title, url = links[0]
-        log.info(f"  使用 {source_name} 源: {title[:40]}...")
-        data = parse_report_page(url)
-        if data:
-            return data
+        # 依次尝试最新前2篇：最新一篇解析失败（如页面格式改版）时回退次新，
+        # 避免整源被丢弃后跳到更新滞后的备用源
+        for _text, url in links[:2]:
+            log.info(f"  使用 {source_name} 源: {_text[:40]}...")
+            data = parse_report_page(url)
+            if data:
+                data["数据源"] = source_name  # 记录来源供推送说明（白名单机制确保不写入CSV）
+                return data
     return None
 
 
@@ -310,6 +350,28 @@ def to_simple_format(record: dict) -> dict:
     yoy_str = f"{yoy:+.1f}%" if yoy is not None else "N/A"
 
     return {"period": period, "price": price, "yoy": yoy_str}
+
+
+def resolve_display(history: List[dict], fetched: dict) -> tuple:
+    """
+    抓取结果与入库历史对比，确定推送展示口径（只进不退）。
+    返回 (display, status)：
+      - "new"   抓到比入库更新 → display 为 fetched（详细格式）
+      - "same"  与入库最新同期（周更数据每日跑的常态）→ display 为 fetched
+      - "stale" 抓到的早于入库最新（如主源被风控降级到滞后的备用源，
+                或解析异常导致 period 为空）→ display 为 history[0]（3字段格式），
+                推送标题展示入库最新一期，绝不回退显示旧数据
+    """
+    f_period = to_simple_format(fetched).get("period", "")
+    if not history:
+        return fetched, "new"  # 首次运行，库为空
+    h_period = history[0]["period"]
+    if not f_period or f_period < h_period:
+        # 空 period（解析畸形守卫，防止空串参与比较和入库）或早于入库最新
+        return history[0], "stale"
+    if f_period == h_period:
+        return fetched, "same"
+    return fetched, "new"
 
 
 # ═══════════════════════════════════════════════════════
@@ -609,16 +671,20 @@ def push_to_wechat(title: str, content: str, token: str) -> bool:
         return False
 
 
-def build_content(history: List[dict], latest_detailed: dict = None) -> tuple:
+def build_content(history: List[dict], display: dict = None, status: str = "new",
+                  fetched: dict = None) -> tuple:
     """
-    构建推送标题和内容
+    构建推送标题和内容（展示口径只进不退）
     - history: 3字段格式列表（period/price/yoy），按 period 降序
-    - latest_detailed: 最新一期详细格式（含月份/周次/数据源URL）
+    - display: 推送标题展示的"最新一期"记录（new/same 为详细格式，stale 为
+               3字段入库记录；None 表示抓取失败，走告警分支）
+    - status: "new" 有新增 / "same" 无新增 / "stale" 抓到的早于入库最新
+    - fetched: 实际抓到的详细格式记录（stale 场景用于来源说明）
     """
     today = datetime.now().strftime('%Y-%m-%d')
 
-    # ── 无新数据：推送失败通知（附数据源链接 + 缓存历史）───
-    if latest_detailed is None:
+    # ── 抓取失败：推送失败通知（附数据源链接 + 缓存历史）───
+    if display is None:
         title = "原奶数据抓取失败"
         source_links = "  |  ".join(
             f'<a href="{cfg["list_url"]}" target="_blank">{name.upper()} 查看原文</a>'
@@ -637,16 +703,28 @@ def build_content(history: List[dict], latest_detailed: dict = None) -> tuple:
                 content += f"- {p['period']}: {p['price']}元/kg (同比 {p['yoy']})\n"
         return title, content
 
-    # ── 有新数据 ─────────────────────────────
-    # 空值保护：所有字段可能为 None
-    month = latest_detailed.get("月份") or "?"
-    week  = latest_detailed.get("第几周") or "?"
-    price = latest_detailed.get("生鲜乳价格_元每公斤")
-    price_str = str(price) if price is not None else "N/A"
-    yoy   = latest_detailed.get("同比变化%")
-
-    yoy_str = f"{yoy:+.1f}%" if yoy is not None else "N/A"
-    title   = f"原奶{month}月第{week}周 {price_str} 同比{yoy_str}"
+    # ── 标题：确定展示的 月/周/价格/同比 ─────────────────
+    if status == "stale":
+        # display 是 3 字段入库记录，从 period 反推"X月第Y周"
+        period = display.get("period", "")
+        week_info = date_to_week_info(period) if period else None
+        price_str = str(display.get("price", "N/A"))
+        yoy_str = display.get("yoy", "N/A")
+        if week_info:
+            month, week = week_info
+            title = f"原奶{month}月第{week}周 {price_str} 同比{yoy_str}"
+        else:
+            # 反推失败（跨月歧义/畸形日期）：退化用日期格式，保证信息准确
+            title = f"原奶{period} {price_str} 同比{yoy_str}"
+    else:
+        # display 是详细格式（即抓取结果），空值保护：所有字段可能为 None
+        month = display.get("月份") or "?"
+        week  = display.get("第几周") or "?"
+        price = display.get("生鲜乳价格_元每公斤")
+        price_str = str(price) if price is not None else "N/A"
+        yoy   = display.get("同比变化%")
+        yoy_str = f"{yoy:+.1f}%" if yoy is not None else "N/A"
+        title   = f"原奶{month}月第{week}周 {price_str} 同比{yoy_str}"
 
     # 构建表格行（history 是 3字段格式，取最近7周）
     rows = []
@@ -654,14 +732,37 @@ def build_content(history: List[dict], latest_detailed: dict = None) -> tuple:
         price_str_row = str(p["price"]) if isinstance(p["price"], (int, float)) else str(p["price"])
         rows.append(f"| {p['period']} | {price_str_row.ljust(14)} | {p['yoy'].ljust(10)} |")
 
-    # 数据源说明 + 原文链接 + 发布时间
-    source_note = "\n\n> 数据来源：农业农村部畜牧兽医局"
-    publish_date = latest_detailed.get("发布日期") or ""
-    if publish_date:
-        source_note += f"  |  发布时间：{publish_date}"
-    source_url = latest_detailed.get("数据来源URL") or ""
-    if source_url:
-        source_note += f'  |  <a href="{source_url}" target="_blank">查看原文</a>'
+    # ── 状态说明（区分「无新增」与「抓到滞后旧数据」两种情形）───
+    status_note = ""
+    if status == "same":
+        src = fetched.get("数据源", "") if fetched else ""
+        src_tag = f"（{src} 源）" if src else ""
+        f_period = display.get("估算日期") or "?"
+        status_note = f"\n\n> 本次无新增{src_tag}，数据源最新一期仍为 {f_period}（周度更新）。"
+    elif status == "stale":
+        f_month = (fetched.get("月份") if fetched else None) or "?"
+        f_week = (fetched.get("第几周") if fetched else None) or "?"
+        f_src = (fetched.get("数据源") if fetched else None) or "未知源"
+        h_period = display.get("period", "")
+        h_week_info = date_to_week_info(h_period) if h_period else None
+        h_desc = f"{h_week_info[0]}月第{h_week_info[1]}周" if h_week_info else h_period
+        status_note = (
+            f"\n\n> 今日抓取到 {f_month}月第{f_week}周（来自 {f_src} 源，更新滞后），"
+            f"早于已入库最新一期 {h_desc}，仍展示最新入库数据。"
+        )
+
+    # ── 数据源说明 + 原文链接 + 发布时间 ─────────────────
+    if status == "stale":
+        # 入库记录不含原文链接与发布时间，只标注来源性质
+        source_note = "\n\n> 数据来源：农业农村部畜牧兽医局（历史入库数据）"
+    else:
+        source_note = "\n\n> 数据来源：农业农村部畜牧兽医局"
+        publish_date = display.get("发布日期") or ""
+        if publish_date:
+            source_note += f"  |  发布时间：{publish_date}"
+        source_url = display.get("数据来源URL") or ""
+        if source_url:
+            source_note += f'  |  <a href="{source_url}" target="_blank">查看原文</a>'
 
     # 近期趋势
     prices_valid = [
@@ -681,6 +782,7 @@ def build_content(history: List[dict], latest_detailed: dict = None) -> tuple:
     content += "| 日期 | 均价（元/kg） | 同比变化 |\n"
     content += "| ----- | --------------- | ---------- |\n"
     content += "\n".join(rows) + "\n"
+    content += status_note
     content += source_note
     content += trend
 
@@ -723,9 +825,22 @@ def main():
     latest = fetch_latest()
 
     if latest:
-        print(f"  最新: {latest['估算日期']} {latest['生鲜乳价格_元每公斤']} 元/公斤")
+        print(f"  最新: {latest['估算日期']} {latest['生鲜乳价格_元每公斤']} 元/公斤"
+              f"（来源: {latest.get('数据源', '?')}）")
     else:
         print("\n  所有数据源均未抓取到新数据")
+
+    # Step 2.5: 与入库历史对比，确定推送展示口径（只进不退）
+    # 即使主源偶发失败、降级到更新滞后的备用源，推送标题也绝不回退显示旧数据
+    if latest:
+        display, status = resolve_display(history, latest)
+        if status == "stale":
+            print(f"  [防回退] 抓取数据早于入库最新，推送将展示入库最新: "
+                  f"{display['period']} {display['price']} 元/公斤")
+        elif status == "same":
+            print("  数据源无新增（周更数据每日跑属正常）")
+    else:
+        display, status = None, "fail"
 
     # Step 3: 去重合并历史数据
     print("\n[3/5] 合并历史数据...")
@@ -744,7 +859,7 @@ def main():
     # Step 5: 推送到 ShowDoc
     print("\n[5/5] 推送到 ShowDoc...")
     if not args.no_push and PUSH_TOKEN:
-        title, content = build_content(history, latest)
+        title, content = build_content(history, display, status, fetched=latest)
         push_to_wechat(title, content, PUSH_TOKEN)
     else:
         title = "(未推送)"
@@ -752,12 +867,16 @@ def main():
 
     # 摘要
     print("\n" + "=" * 50)
-    if latest:
-        yoy = latest.get('同比变化%')
-        yoy_s = f"{yoy:+.1f}%" if yoy is not None else "N/A"
-        print(f"推送标题: 原奶{latest.get('月份', '?')}月第{latest.get('第几周', '?')}周 {latest.get('生鲜乳价格_元每公斤', 'N/A')} 同比{yoy_s}")
-    else:
+    if latest is None:
         print("数据源抓取失败，已推送失败通知")
+    elif status == "stale":
+        print(f"推送标题: 展示入库最新 {display.get('period')} {display.get('price')}"
+              f"（今日抓到 {latest.get('月份')}月第{latest.get('第几周')}周 更旧，未回退）")
+    else:
+        yoy = display.get('同比变化%')
+        yoy_s = f"{yoy:+.1f}%" if yoy is not None else "N/A"
+        print(f"推送标题: 原奶{display.get('月份', '?')}月第{display.get('第几周', '?')}周 "
+              f"{display.get('生鲜乳价格_元每公斤', 'N/A')} 同比{yoy_s}")
     print(f"历史数据: 共 {len(history)} 条")
     print(f"稳定访问: https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/tag/{RELEASE_TAG}")
     print("=" * 50)
